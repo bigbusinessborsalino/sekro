@@ -1,7 +1,8 @@
 import os
 import logging
 import aiohttp
-import random
+import asyncio
+from aiohttp import web
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -47,6 +48,16 @@ SITES = {
         }
     }
 }
+
+# Health check setup
+async def health_check(request):
+    return web.Response(text="OK")
+
+def setup_health_check(app):
+    web_app = web.Application()
+    web_app.add_routes([web.get('/health', health_check)])
+    app.bot._web_app = web_app
+    return web_app
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Send welcome message"""
@@ -156,12 +167,24 @@ if __name__ == "__main__":
     if not TOKEN:
         raise ValueError("No BOT_TOKEN found in environment variables!")
     
-    # Create application
-    application = ApplicationBuilder().token(TOKEN).build()
+    # Create application with timeout settings
+    application = ApplicationBuilder() \
+        .token(TOKEN) \
+        .read_timeout(30) \
+        .write_timeout(30) \
+        .pool_timeout(30) \
+        .get_updates_read_timeout(30) \
+        .build()
+    
+    # Setup health check
+    setup_health_check(application)
     
     # Add handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("search", search))
     
-    # Start bot
-    application.run_polling()
+    # Start bot with web server
+    application.run_polling(
+        http_port=8080,
+        health_check_path='/health'
+    )
