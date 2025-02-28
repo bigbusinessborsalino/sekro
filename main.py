@@ -19,6 +19,8 @@ logging.basicConfig(
 
 # Configuration
 TOKEN = os.getenv("BOT_TOKEN")
+PORT = int(os.getenv("PORT", 8080))  # Updated port for Koyeb
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://your-app-name.koyeb.app")  # Ensure this is set in your environment
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
 }
@@ -52,12 +54,6 @@ SITES = {
 # Health check setup
 async def health_check(request):
     return web.Response(text="OK")
-
-def setup_health_check(app):
-    web_app = web.Application()
-    web_app.add_routes([web.get('/health', health_check)])
-    app.bot._web_app = web_app
-    return web_app
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Send welcome message"""
@@ -163,28 +159,16 @@ def create_keyboard(results: dict):
     return keyboard
 
 if __name__ == "__main__":
-    # Validate token
     if not TOKEN:
         raise ValueError("No BOT_TOKEN found in environment variables!")
     
-    # Create application with timeout settings
-    application = ApplicationBuilder() \
-        .token(TOKEN) \
-        .read_timeout(30) \
-        .write_timeout(30) \
-        .pool_timeout(30) \
-        .get_updates_read_timeout(30) \
-        .build()
+    application = ApplicationBuilder().token(TOKEN).build()
     
-    # Setup health check
-    setup_health_check(application)
-    
-    # Add handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("search", search))
     
-    # Start bot with web server
-    application.run_polling(
-        http_port=8080,
-        health_check_path='/health'
+    application.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        webhook_url=f"{WEBHOOK_URL}/{TOKEN}"
     )
