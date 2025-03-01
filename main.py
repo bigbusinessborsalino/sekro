@@ -1,174 +1,97 @@
-import os
 import logging
-import aiohttp
-import asyncio
-from aiohttp import web
-from bs4 import BeautifulSoup
-from dotenv import load_dotenv
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
-
-# Load environment variables
-load_dotenv()
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    CallbackQueryHandler,
+    ConversationHandler
+)
+from config import Config
+from bot.handlers import (
+    start,
+    search,
+    show_episode_selection,
+    handle_episode_pagination,
+    handle_quality_selection,
+    handle_download
+)
+from bot.utils import error_handler
 
 # Configure logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
+logger = logging.getLogger(__name__)
 
-# Configuration
-TOKEN = os.getenv("BOT_TOKEN")
-PORT = int(os.getenv("PORT", 8080))  # Updated port for Koyeb
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://your-app-name.koyeb.app")  # Ensure this is set in your environment
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-}
-SITES = {
-    "zoro": {
-        "url": "https://zoro.tv/search?keyword=",
-        "selectors": {
-            "container": "div.film_list-wrap div.flw-item",
-            "title": "h2.film-name a",
-            "link": "h2.film-name a"
-        }
-    },
-    "gogoanime": {
-        "url": "https://gogoanime.hianime/search.html?keyword=",
-        "selectors": {
-            "container": "ul.items li",
-            "title": "p.name a",
-            "link": "p.name a"
-        }
-    },
-    "nyaa": {
-        "url": "https://nyaa.si/?q=",
-        "selectors": {
-            "container": "table.torrent-list tbody tr",
-            "title": "td:nth-of-type(1) a:not(.comments)",
-            "link": "td:nth-of-type(1) a:not(.comments)"
-        }
-    }
-}
+def main() -> None:
+    """Start the bot."""
+    # Validate configuration
+    Config.validate()
 
-# Health check setup
-async def health_check(request):
-    return web.Response(text="OK")
+    # Create application
+    application = ApplicationBuilder() \
+        .token(Config.BOT_TOKEN) \
+        .post_init(setup_health_check) \
+        .build()
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Send welcome message"""
-    await update.message.reply_text(
-        "🎌 Anime Search Bot\n\n"
-        "Use /search <anime_name> to find anime across multiple sites!\n"
-        "Example: /search Attack on Titan"
+    # Add handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("search", search.search))
+
+    # Episode selection flow
+    application.add_handler(CallbackQueryHandler(
+        show_episode_selection, 
+        pattern=r"^select_\d+$"
+    ))
+    application.add_handler(CallbackQueryHandler(
+        handle_episode_pagination,
+        pattern=r"^ep_page_\d+$"
+    ))
+
+    # Quality selection flow
+    application.add_handler(CallbackQueryHandler(
+        handle_quality_selection,
+        pattern=r"^ep_\d+$"
+    ))
+
+    # Download handling
+    application.add_handler(CallbackQueryHandler(
+        handle_download,
+        pattern=r"^quality_"
+    ))
+
+    # Navigation handlers
+    application.add_handler(CallbackQueryHandler(
+        search.show_search_page,
+        pattern=r"^page_\d+$"
+    ))
+    application.add_handler(CallbackQueryHandler(
+        search.show_search_page,
+        pattern="^back_search$"
+    ))
+    application.add_handler(CallbackQueryHandler(
+        show_episode_selection,
+        pattern="^back_episodes$"
+    ))
+
+    # Error handler
+    application.add_error_handler(error_handler)
+
+    # Start the Bot
+    application.run_polling(
+        http_port=8080,
+        health_check_path='/health',
+        allowed_updates=Update.ALL_TYPES
     )
 
-async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle search command"""
-    if not context.args:
-        await update.message.reply_text("⚠️ Please provide a search query!")
-        return
-
-    query = " ".join(context.args)
-    user_id = update.effective_user.id
-    logging.info(f"New search from {user_id}: {query}")
-
-    try:
-        results = await fetch_all_results(query)
-        if not results:
-            await update.message.reply_text("❌ No results found across all sites")
-            return
-
-        response = format_response(query, results)
-        keyboard = create_keyboard(results)
-        
-        await update.message.reply_text(
-            response,
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown"
-        )
-    except Exception as e:
-        logging.error(f"Search error: {str(e)}")
-        await update.message.reply_text("🔧 Temporary server error. Please try again later.")
-
-async def fetch_all_results(query: str):
-    """Fetch results from all sites concurrently"""
-    async with aiohttp.ClientSession() as session:
-        tasks = [
-            fetch_site_results(session, "zoro", query),
-            fetch_site_results(session, "gogoanime", query),
-            fetch_site_results(session, "nyaa", query)
-        ]
-        results = await asyncio.gather(*tasks)
-    return {site: data for site, data in zip(SITES.keys(), results)}
-
-async def fetch_site_results(session: aiohttp.ClientSession, site: str, query: str):
-    """Fetch results from a single site"""
-    try:
-        url = f"{SITES[site]['url']}{query.replace(' ', '%20')}"
-        async with session.get(url, headers=HEADERS) as response:
-            text = await response.text()
-            return parse_results(site, text)
-    except Exception as e:
-        logging.error(f"{site} fetch error: {str(e)}")
-        return []
-
-def parse_results(site: str, html: str):
-    """Parse HTML results for a specific site"""
-    soup = BeautifulSoup(html, 'html.parser')
-    results = []
+async def setup_health_check(application: Application):
+    """Set up health check endpoint"""
+    from aiohttp import web
+    from bot.utils.health import health_check
     
-    for item in soup.select(SITES[site]['selectors']['container']):
-        try:
-            title = item.select_one(SITES[site]['selectors']['title']).text.strip()
-            link = item.select_one(SITES[site]['selectors']['link'])['href']
-            
-            if site == "zoro":
-                link = f"https://zoro.tv{link}"
-            elif site == "nyaa":
-                link = f"https://nyaa.si{link}"
-            elif site == "gogoanime":
-                link = f"https://gogoanime.hianime{link}"
-            
-            results.append((title, link))
-        except Exception as e:
-            logging.warning(f"{site} parse error: {str(e)}")
-    
-    return results[:3]  # Return top 3 results
-
-def format_response(query: str, results: dict):
-    """Format the response message"""
-    response = f"🔍 *Results for* `{query}`:\n\n"
-    for site, items in results.items():
-        if items:
-            response += f"🏮 *{site.capitalize()}*:\n"
-            response += "\n".join([f"• [{title}]({link})" for title, link in items])
-            response += "\n\n"
-    return response
-
-def create_keyboard(results: dict):
-    """Create inline keyboard markup"""
-    keyboard = []
-    for site, items in results.items():
-        if items:
-            site_buttons = [
-                InlineKeyboardButton(title, url=link)
-                for title, link in items
-            ]
-            keyboard.append(site_buttons)
-    return keyboard
+    web_app = web.Application()
+    web_app.add_routes([web.get('/health', health_check)])
+    application.bot._web_app = web_app
 
 if __name__ == "__main__":
-    if not TOKEN:
-        raise ValueError("No BOT_TOKEN found in environment variables!")
-    
-    application = ApplicationBuilder().token(TOKEN).build()
-    
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("search", search))
-    
-    application.run_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        webhook_url=f"{WEBHOOK_URL}/{TOKEN}"
-    )
+    main()
