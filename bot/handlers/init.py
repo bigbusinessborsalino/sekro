@@ -6,6 +6,5 @@ from .download import handle_download
 __all__ = [
     'start', 'search',
     'show_episode_selection', 'handle_episode_pagination',
-    'handle_quality_selection',
-    'handle_download'
+    'handle_quality_selection', 'handle_download'
 ]
